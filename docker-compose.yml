@@ -1,0 +1,20 @@
+services:
+  mcp-memory:
+    build: .
+    # Or use prebuilt image:
+    # image: ghcr.io/lanlibbi/mcp-memory-server:latest
+    container_name: mcp-memory-server
+    restart: unless-stopped
+    ports:
+      - "${MEMORY_PORT:-8080}:8080"
+    environment:
+      # Change this! Generate with: openssl rand -hex 32
+      - MEMORY_API_KEY=${MEMORY_API_KEY:-}
+      - MEMORY_DATA_DIR=/data/memories
+      - MEMORY_PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - memory-data:/data/memories
+
+volumes:
+  memory-data:
