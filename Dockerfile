@@ -17,7 +17,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 # Install only what we need at runtime
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        "mcp[cli]>=1.0.0" \
+        "mcp>=2.0.0" \
         "starlette>=0.37.0" \
         "uvicorn>=0.30.0" \
         "python-multipart>=0.0.9"

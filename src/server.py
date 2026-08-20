@@ -1,13 +1,7 @@
 """
-MCP Memory Server — persistent agent memory via Markdown + SQLite FTS5.
+MCP Memory Server v2 — persistent agent memory via Markdown + SQLite FTS5.
 
-Provides three tools for Blockbrain (or any MCP client):
-  - memory_save: Store a memory entry under a topic
-  - memory_recall: Search memories by keyword/topic
-  - memory_list_topics: List all stored topics
-
-Storage: Markdown files on disk + SQLite FTS5 index for fast search.
-Transport: SSE (Server-Sent Events) — what Blockbrain expects.
+MCP SDK v2 API: MCPServer with @mcp.tool() decorators, Streamable HTTP transport.
 Auth: API Key header (X-API-Key).
 """
 
@@ -22,16 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server import MCPServer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
-import uvicorn
-
+from starlette.routing import Route
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -39,7 +30,7 @@ import uvicorn
 
 DATA_DIR = Path(os.environ.get("MEMORY_DATA_DIR", "/data/memories"))
 DB_PATH = DATA_DIR / "memory.db"
-API_KEY = os.environ.get("MEMORY_API_KEY", "")
+API_KEY = ***"MEMORY_API_KEY", "")
 PORT = int(os.environ.get("MEMORY_PORT", "8080"))
 MAX_QUERY_RESULTS = int(os.environ.get("MEMORY_MAX_RESULTS", "10"))
 
@@ -72,12 +63,10 @@ def _init_db() -> sqlite3.Connection:
             updated_at TEXT NOT NULL
         )
     """)
-    # FTS5 virtual table for full-text search
     conn.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
         USING fts5(topic, title, content, content='memories', content_rowid='rowid')
     """)
-    # Triggers to keep FTS in sync
     conn.execute("""
         CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
             INSERT INTO memories_fts(rowid, topic, title, content)
@@ -111,13 +100,11 @@ def save_memory(topic: str, title: str, content: str) -> dict:
     topic_dir = DATA_DIR / topic_slug
     topic_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate ID from topic+title hash for idempotency
     entry_id = hashlib.sha256(f"{topic}:{title}".encode()).hexdigest()[:16]
     now = datetime.now(timezone.utc).isoformat()
     md_filename = f"{_slug(title)}.md"
     md_path = topic_dir / md_filename
 
-    # Write Markdown file
     md_content = f"""---
 id: {entry_id}
 topic: {topic}
@@ -132,7 +119,6 @@ updated_at: {now}
 """
     md_path.write_text(md_content, encoding="utf-8")
 
-    # Upsert into SQLite
     DB.execute("""
         INSERT INTO memories (id, topic, title, content, file_path, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -154,12 +140,10 @@ updated_at: {now}
 
 def recall_memory(query: str, limit: int = MAX_QUERY_RESULTS) -> dict:
     """Search memories using SQLite FTS5 full-text search."""
-    # FTS5 query syntax: escape special chars, use OR for multi-word
     safe_query = re.sub(r'[()*":]', " ", query).strip()
     if not safe_query:
         return {"results": [], "count": 0}
 
-    # Try FTS5 MATCH first; fall back to LIKE if FTS finds nothing
     rows = DB.execute("""
         SELECT m.id, m.topic, m.title, m.content, m.file_path, m.created_at,
                rank
@@ -171,7 +155,6 @@ def recall_memory(query: str, limit: int = MAX_QUERY_RESULTS) -> dict:
     """, (safe_query, limit)).fetchall()
 
     if not rows:
-        # Fallback: LIKE search
         pattern = f"%{query}%"
         rows = DB.execute("""
             SELECT id, topic, title, content, file_path, created_at, 0 as rank
@@ -233,129 +216,68 @@ def delete_memory(entry_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MCP Server
+# MCP Server (v2 API — MCPServer with @mcp.tool())
 # ---------------------------------------------------------------------------
 
-server = Server("memory-server")
+mcp = MCPServer(
+    "memory-server",
+    title="Memory Server",
+    description="Persistent agent memory via Markdown + SQLite FTS5",
+)
 
 
-@server.list_tools()
-async def list_tools():
-    from mcp.types import Tool
-    return [
-        Tool(
-            name="memory_save",
-            description=(
-                "Save a memory entry so the agent can recall it in future sessions. "
-                "Use this AFTER solving a problem, completing a task, or learning "
-                "something worth remembering. Always provide a clear topic and title."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Category/topic for this memory (e.g. 'contract-review', 'supplier-issue')",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Short descriptive title for this memory entry",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The full content to remember — what was the problem, what was the solution, what was learned",
-                    },
-                },
-                "required": ["topic", "title", "content"],
-            },
-        ),
-        Tool(
-            name="memory_recall",
-            description=(
-                "Search stored memories by keyword or topic. "
-                "Use this BEFORE starting a task to check if similar problems "
-                "were solved before and what the solution was."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query — keywords, topic name, or problem description",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max number of results (default 10)",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="memory_list_topics",
-            description=(
-                "List all topics that have stored memories. "
-                "Use this to get an overview of what the agent already knows."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="memory_delete",
-            description=(
-                "Delete a specific memory entry by its ID. "
-                "Use this to remove outdated or incorrect memories."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "The ID of the memory entry to delete",
-                    },
-                },
-                "required": ["id"],
-            },
-        ),
-    ]
+@mcp.tool()
+def memory_save(topic: str, title: str, content: str) -> dict:
+    """
+    Save a memory entry so the agent can recall it in future sessions.
+    Use this AFTER solving a problem, completing a task, or learning
+    something worth remembering. Always provide a clear topic and title.
+
+    Args:
+        topic: Category/topic for this memory (e.g. 'contract-review', 'supplier-issue')
+        title: Short descriptive title for this memory entry
+        content: The full content to remember — what was the problem, what was the solution, what was learned
+    """
+    return save_memory(topic=topic, title=title, content=content)
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    from mcp.types import TextContent
+@mcp.tool()
+def memory_recall(query: str, limit: int = 10) -> dict:
+    """
+    Search stored memories by keyword or topic.
+    Use this BEFORE starting a task to check if similar problems
+    were solved before and what the solution was.
 
-    if name == "memory_save":
-        result = save_memory(
-            topic=arguments["topic"],
-            title=arguments["title"],
-            content=arguments["content"],
-        )
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    Args:
+        query: Search query — keywords, topic name, or problem description
+        limit: Max number of results (default 10)
+    """
+    return recall_memory(query=query, limit=limit)
 
-    elif name == "memory_recall":
-        result = recall_memory(
-            query=arguments["query"],
-            limit=arguments.get("limit", MAX_QUERY_RESULTS),
-        )
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    elif name == "memory_list_topics":
-        result = list_topics()
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+@mcp.tool()
+def memory_list_topics() -> dict:
+    """
+    List all topics that have stored memories.
+    Use this to get an overview of what the agent already knows.
+    """
+    return list_topics()
 
-    elif name == "memory_delete":
-        result = delete_memory(arguments["id"])
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    else:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+@mcp.tool()
+def memory_delete(id: str) -> dict:
+    """
+    Delete a specific memory entry by its ID.
+    Use this to remove outdated or incorrect memories.
+
+    Args:
+        id: The ID of the memory entry to delete
+    """
+    return delete_memory(id)
 
 
 # ---------------------------------------------------------------------------
-# HTTP Server with SSE transport + API Key auth
+# HTTP Server with API Key auth + health endpoint
 # ---------------------------------------------------------------------------
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
@@ -365,7 +287,6 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         if not API_KEY:
             return await call_next(request)
 
-        # Health endpoint is always open
         if request.url.path == "/health":
             return await call_next(request)
 
@@ -387,31 +308,25 @@ async def health(request: Request) -> Response:
     })
 
 
-def create_app() -> Starlette:
-    """Create the Starlette app with SSE transport for MCP."""
-    sse = SseServerTransport("/messages/")
+# Build the Starlette app from MCPServer's streamable HTTP app,
+# then add our custom routes and middleware on top.
 
-    async def handle_sse(request: Request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
+mcp_app = mcp.streamable_http_app()
 
-    routes = [
-        Route("/health", health, methods=["GET"]),
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse.handle_post_message),
-    ]
+# Merge custom routes into the MCP app's routes
+custom_routes = [
+    Route("/health", health, methods=["GET"]),
+]
 
-    middleware = [Middleware(ApiKeyMiddleware)]
-
-    return Starlette(routes=routes, middleware=middleware)
-
-
-app = create_app()
+# Create a combined app: middleware wraps the MCP app with our extra routes
+app = Starlette(
+    routes=custom_routes + mcp_app.routes,
+    middleware=[Middleware(ApiKeyMiddleware)],
+)
 
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(
         "src.server:app",
         host="0.0.0.0",

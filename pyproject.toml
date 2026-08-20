@@ -6,7 +6,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp>=2.0.0",
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
     "python-multipart>=0.0.9",
