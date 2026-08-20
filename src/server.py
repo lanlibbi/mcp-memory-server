@@ -30,7 +30,7 @@ from starlette.routing import Route
 
 DATA_DIR = Path(os.environ.get("MEMORY_DATA_DIR", "/data/memories"))
 DB_PATH = DATA_DIR / "memory.db"
-API_KEY = ***"MEMORY_API_KEY", "")
+API_KEY = os.environ.get("MEMORY_API_KEY", "")
 PORT = int(os.environ.get("MEMORY_PORT", "8080"))
 MAX_QUERY_RESULTS = int(os.environ.get("MEMORY_MAX_RESULTS", "10"))
 
